@@ -5,10 +5,31 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
+	"strings"
+)
+
+// ANSI color codes
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorBlue   = "\033[34m"
+	colorPurple = "\033[35m"
+	colorCyan   = "\033[36m"
+	colorWhite  = "\033[37m"
+	colorBold   = "\033[1m"
 )
 
 func main() {
+	// Check if colors should be disabled (e.g., when output is not a terminal)
+	useColors := true
+	if os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {
+		useColors = false
+	}
+
 	// Regular expressions to match terraform plan output lines
 	createRegex := regexp.MustCompile(`^\s*\+\s(.+?)\s+{`)
 	updateRegex := regexp.MustCompile(`^\s*~\s(.+?)\s+{`)
@@ -29,8 +50,8 @@ func main() {
 
 	// Track resources by action type
 	resources := map[string][]string{
-		"create":  {},
-		"update":  {},
+		"create": {},
+		"update": {},
 		"destroy": {},
 	}
 
@@ -39,6 +60,37 @@ func main() {
 	summaryAdds := 0
 	summaryChanges := 0
 	summaryDestroys := 0
+
+	// Extract the resource type from a resource name
+	extractResourceType := func(resource string) string {
+		// Resource format can be one of:
+		// 1. aws_s3_bucket.example
+		// 2. module.network.aws_vpc.main
+
+		// First, handle module resources by removing module prefix
+		parts := strings.Split(resource, ".")
+		if len(parts) > 2 && parts[0] == "module" {
+			// It's a module resource, find the resource type
+			for i, part := range parts {
+				// Resource types usually start with provider prefix (aws_, azurerm_, google_)
+				if (i > 1 && (strings.HasPrefix(part, "aws_") ||
+					strings.HasPrefix(part, "azurerm_") ||
+					strings.HasPrefix(part, "google_") ||
+					strings.HasPrefix(part, "kubernetes_") ||
+					strings.HasPrefix(part, "digitalocean_"))) {
+					return part
+				}
+			}
+		}
+
+		// For non-module resources or if we couldn't find a type in a module resource
+		if len(parts) >= 2 {
+			return parts[0]
+		}
+
+		// If we can't determine type, return the full resource
+		return resource
+	}
 
 	// Read from stdin line by line
 	scanner := bufio.NewScanner(os.Stdin)
@@ -94,61 +146,127 @@ func main() {
 	}
 
 	// Print summary
-	fmt.Println("\n=== TERRAFORM PLAN SUMMARY ===")
+	fmt.Println()
+	if useColors {
+		fmt.Println(colorBold + "=== TERRAFORM PLAN SUMMARY ===" + colorReset)
+	} else {
+		fmt.Println("=== TERRAFORM PLAN SUMMARY ===")
+	}
 	fmt.Println()
 
 	// If we found detailed resources, use those
 	resourcesFound := false
 
-	if len(resources["create"]) > 0 {
+	// Group resources first by action, then by type within each action
+	if len(resources["create"]) > 0 || len(resources["update"]) > 0 || len(resources["destroy"]) > 0 {
 		resourcesFound = true
-		fmt.Println("RESOURCES TO CREATE:")
-		for _, resource := range resources["create"] {
-			fmt.Printf("  + %s\n", resource)
-		}
-		fmt.Println()
-	}
 
-	if len(resources["update"]) > 0 {
-		resourcesFound = true
-		fmt.Println("RESOURCES TO UPDATE:")
-		for _, resource := range resources["update"] {
-			fmt.Printf("  ~ %s\n", resource)
-		}
-		fmt.Println()
-	}
+		// Function to process and display resources by action, then by type
+		displayResourcesByActionThenType := func(action string, actionLabel string, symbolColor string, symbol string) {
+			if len(resources[action]) == 0 {
+				return
+			}
 
-	if len(resources["destroy"]) > 0 {
-		resourcesFound = true
-		fmt.Println("RESOURCES TO DESTROY:")
-		for _, resource := range resources["destroy"] {
-			fmt.Printf("  - %s\n", resource)
+			// Group resources by type
+			typeMap := make(map[string][]string)
+
+			for _, resource := range resources[action] {
+				resourceType := extractResourceType(resource)
+				typeMap[resourceType] = append(typeMap[resourceType], resource)
+			}
+
+			// Sort the types
+			types := make([]string, 0, len(typeMap))
+			for resourceType := range typeMap {
+				types = append(types, resourceType)
+			}
+			sort.Strings(types)
+
+			// Print section header
+			if useColors {
+				fmt.Printf("%s%s:%s\n", colorBold, actionLabel, colorReset)
+			} else {
+				fmt.Printf("%s:\n", actionLabel)
+			}
+
+			// For each type
+			for _, resourceType := range types {
+				resources := typeMap[resourceType]
+
+				// Sort resources by name within type
+				sort.Strings(resources)
+
+				// Print type subheader
+				if useColors {
+					fmt.Printf("  %s# %s RESOURCES:%s\n", colorBold, strings.ToUpper(resourceType), colorReset)
+				} else {
+					fmt.Printf("  # %s RESOURCES:\n", strings.ToUpper(resourceType))
+				}
+
+				// Print resources of this type
+				for _, resource := range resources {
+					if useColors {
+						fmt.Printf("    %s%s %s%s\n", symbolColor, symbol, resource, colorReset)
+					} else {
+						fmt.Printf("    %s %s\n", symbol, resource)
+					}
+				}
+				fmt.Println()
+			}
 		}
-		fmt.Println()
+
+		// Display resources in order: create, update, destroy
+		displayResourcesByActionThenType("create", "RESOURCES TO CREATE", colorGreen, "+")
+		displayResourcesByActionThenType("update", "RESOURCES TO UPDATE", colorYellow, "~")
+		displayResourcesByActionThenType("destroy", "RESOURCES TO DESTROY", colorRed, "-")
 	}
 
 	// If we didn't find detailed resources but found a summary line, use that
 	if !resourcesFound && foundSummary {
 		if summaryAdds > 0 {
-			fmt.Printf("RESOURCES TO CREATE: %d (details not available)\n\n", summaryAdds)
+			if useColors {
+				fmt.Printf("%sRESOURCES TO CREATE:%s %d (details not available)\n\n",
+					colorBold, colorReset, summaryAdds)
+			} else {
+				fmt.Printf("RESOURCES TO CREATE: %d (details not available)\n\n", summaryAdds)
+			}
 		}
 
 		if summaryChanges > 0 {
-			fmt.Printf("RESOURCES TO UPDATE: %d (details not available)\n\n", summaryChanges)
+			if useColors {
+				fmt.Printf("%sRESOURCES TO UPDATE:%s %d (details not available)\n\n",
+					colorBold, colorReset, summaryChanges)
+			} else {
+				fmt.Printf("RESOURCES TO UPDATE: %d (details not available)\n\n", summaryChanges)
+			}
 		}
 
 		if summaryDestroys > 0 {
-			fmt.Printf("RESOURCES TO DESTROY: %d (details not available)\n\n", summaryDestroys)
+			if useColors {
+				fmt.Printf("%sRESOURCES TO DESTROY:%s %d (details not available)\n\n",
+					colorBold, colorReset, summaryDestroys)
+			} else {
+				fmt.Printf("RESOURCES TO DESTROY: %d (details not available)\n\n", summaryDestroys)
+			}
 		}
 
-		fmt.Printf("TOTAL CHANGES: %d\n", summaryAdds+summaryChanges+summaryDestroys)
+		totalChanges := summaryAdds + summaryChanges + summaryDestroys
+		if useColors {
+			fmt.Printf("%sTOTAL CHANGES:%s %d\n", colorBold, colorReset, totalChanges)
+		} else {
+			fmt.Printf("TOTAL CHANGES: %d\n", totalChanges)
+		}
 	} else {
 		totalChanges := len(resources["create"]) + len(resources["update"]) + len(resources["destroy"])
-		fmt.Printf("TOTAL CHANGES: %d\n", totalChanges)
+		if useColors {
+			fmt.Printf("%sTOTAL CHANGES:%s %d\n", colorBold, colorReset, totalChanges)
+		} else {
+			fmt.Printf("TOTAL CHANGES: %d\n", totalChanges)
+		}
 	}
 
 	// Add a note if we got the summary from Terraform's summary line but couldn't find resources
-	if !resourcesFound && foundSummary && (summaryAdds+summaryChanges+summaryDestroys) > 0 {
+	if !resourcesFound && foundSummary && (summaryAdds + summaryChanges + summaryDestroys) > 0 {
 		fmt.Println("\nNote: Resource details weren't found in the output.")
 		fmt.Println("To see full resource details, try running with:")
 		fmt.Println("terraform plan -no-color | terraform-plan-filter")
