@@ -61,9 +61,45 @@ func FormatText(resources *model.ResourceCollection, opts Options) (string, erro
 			}
 			sb.WriteString("\n")
 
-			// Print resources grouped by type
+			// First print module resources if they exist
+			if moduleResources, ok := typeMap["module"]; ok && len(moduleResources) > 0 {
+				// Print type subheader
+				if opts.UseColors {
+					sb.WriteString(fmt.Sprintf("  %s# MODULE RESOURCES:%s\n",
+						util.ColorBold, util.ColorReset))
+				} else {
+					sb.WriteString("  # MODULE RESOURCES:\n")
+				}
+
+				// Print module resources
+				for _, resource := range moduleResources {
+					if opts.UseColors {
+						sb.WriteString(fmt.Sprintf("    %s%s %s%s\n",
+							color, symbol, resource, util.ColorReset))
+					} else {
+						sb.WriteString(fmt.Sprintf("    %s %s\n", symbol, resource))
+					}
+				}
+				sb.WriteString("\n")
+
+				// Remove "module" from the types list since we've already processed it
+				var filteredTypes []string
+				for _, t := range types {
+					if t != "module" {
+						filteredTypes = append(filteredTypes, t)
+					}
+				}
+				types = filteredTypes
+			}
+
+			// Print resources grouped by type (excluding modules which we've already handled)
 			for _, resourceType := range types {
 				resources := typeMap[resourceType]
+
+				// Skip empty resource types
+				if len(resources) == 0 {
+					continue
+				}
 
 				// Print type subheader
 				if opts.UseColors {
@@ -130,6 +166,19 @@ func FormatText(resources *model.ResourceCollection, opts Options) (string, erro
 			util.ColorBold, util.ColorReset, totalChanges))
 	} else {
 		sb.WriteString(fmt.Sprintf("TOTAL CHANGES: %d\n", totalChanges))
+	}
+
+	// If we have a summary directly from the plan, show it
+	if resources.FoundSummary {
+		planSummary := fmt.Sprintf("Plan: %d to add, %d to change, %d to destroy.",
+			resources.SummaryAdds, resources.SummaryChanges, resources.SummaryDestroys)
+
+		if opts.UseColors {
+			sb.WriteString(fmt.Sprintf("\n%sPlan Summary:%s %s\n",
+				util.ColorBold, util.ColorReset, planSummary))
+		} else {
+			sb.WriteString(fmt.Sprintf("\nPlan Summary: %s\n", planSummary))
+		}
 	}
 
 	return sb.String(), nil
@@ -244,6 +293,13 @@ func FormatHTML(resources *model.ResourceCollection) (string, error) {
             color: #666;
             margin-top: 30px;
         }
+        .plan-summary {
+            margin-top: 20px;
+            font-weight: bold;
+            padding: 10px;
+            background-color: #f0f8ff;
+            border-radius: 4px;
+        }
     </style>
 </head>
 <body>
@@ -275,9 +331,32 @@ func FormatHTML(resources *model.ResourceCollection) (string, error) {
 			}
 			sort.Strings(types)
 
+			// Special handling for module resources
+			if moduleResources, ok := typeMap["module"]; ok && len(moduleResources) > 0 {
+				sb.WriteString("        <div class=\"resource-type\">MODULE RESOURCES</div>\n")
+
+				for _, resource := range moduleResources {
+					sb.WriteString(fmt.Sprintf("        <div class=\"resource\">%s</div>\n", resource))
+				}
+
+				// Remove module from the types list
+				var filteredTypes []string
+				for _, t := range types {
+					if t != "module" {
+						filteredTypes = append(filteredTypes, t)
+					}
+				}
+				types = filteredTypes
+			}
+
 			// Render each type
 			for _, resourceType := range types {
 				resources := typeMap[resourceType]
+
+				// Skip empty resource types
+				if len(resources) == 0 {
+					continue
+				}
 
 				sb.WriteString(fmt.Sprintf("        <div class=\"resource-type\">%s</div>\n",
 					strings.ToUpper(resourceType)))
@@ -313,6 +392,14 @@ func FormatHTML(resources *model.ResourceCollection) (string, error) {
 		}
 
 		sb.WriteString("    </div>\n")
+	}
+
+	// Plan summary
+	if resources.FoundSummary {
+		planSummary := fmt.Sprintf("Plan: %d to add, %d to change, %d to destroy.",
+			resources.SummaryAdds, resources.SummaryChanges, resources.SummaryDestroys)
+
+		sb.WriteString(fmt.Sprintf("    <div class=\"plan-summary\">%s</div>\n", planSummary))
 	}
 
 	// Timestamp
