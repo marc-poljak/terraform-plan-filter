@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"strings"
 
 	"github.com/marc-poljak/terraform-plan-filter/internal/model"
@@ -62,11 +61,13 @@ type TerraformPlanJSON struct {
 	PriorState struct {
 		FormatVersion string `json:"format_version"`
 	} `json:"prior_state"`
+	// Modify this part to handle more flexible JSON structures
 	Config struct {
 		ProviderConfig map[string]struct {
 			Name        string `json:"name"`
 			Expressions map[string]struct {
-				ConstantValue string `json:"constant_value"`
+				// Use json.RawMessage instead of string to handle any JSON type
+				ConstantValue json.RawMessage `json:"constant_value"`
 			} `json:"expressions"`
 		} `json:"provider_config"`
 	} `json:"configuration"`
@@ -77,7 +78,7 @@ func ParseTerraformPlan(reader io.Reader) (*model.ResourceCollection, error) {
 	resources := model.NewResourceCollection()
 
 	// Read the entire input
-	data, err := ioutil.ReadAll(reader)
+	data, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, err
 	}
@@ -85,11 +86,14 @@ func ParseTerraformPlan(reader io.Reader) (*model.ResourceCollection, error) {
 	// Parse the JSON
 	var plan TerraformPlanJSON
 	if err := json.Unmarshal(data, &plan); err != nil {
-		// Better error message for non-JSON input
+		// Handle more gracefully if the JSON structure doesn't match our expectations
+		// First, check if this is a text plan instead of JSON
 		if strings.HasPrefix(string(data), "Terraform will perform") {
 			return nil, fmt.Errorf("input appears to be text format, not JSON. Please use 'terraform show -json tfplan' to generate JSON output")
 		}
-		return nil, fmt.Errorf("error parsing JSON: %w", err)
+
+		// Try a more flexible approach to at least extract resource changes
+		return parseResourceChangesOnly(data)
 	}
 
 	// Process resource changes from the JSON plan
@@ -175,6 +179,81 @@ func ParseTerraformPlan(reader io.Reader) (*model.ResourceCollection, error) {
 		}
 	}
 
+	resources.HasDetailedResources = true
+	return resources, nil
+}
+
+// parseResourceChangesOnly attempts to extract just the resource changes from the JSON
+// This is a fallback when the full JSON structure doesn't match our expectations
+func parseResourceChangesOnly(data []byte) (*model.ResourceCollection, error) {
+	resources := model.NewResourceCollection()
+
+	// Try to extract just the resource_changes array
+	var jsonMap map[string]json.RawMessage
+	if err := json.Unmarshal(data, &jsonMap); err != nil {
+		return nil, fmt.Errorf("error parsing JSON: %w", err)
+	}
+
+	// Check if resource_changes exists
+	resourceChangesJSON, ok := jsonMap["resource_changes"]
+	if !ok {
+		return nil, fmt.Errorf("couldn't find resource_changes in the JSON")
+	}
+
+	// Parse the resource changes
+	var resourceChanges []struct {
+		Address string `json:"address"`
+		Mode    string `json:"mode"`
+		Change  struct {
+			Actions []string `json:"actions"`
+		} `json:"change"`
+	}
+
+	if err := json.Unmarshal(resourceChangesJSON, &resourceChanges); err != nil {
+		return nil, fmt.Errorf("error parsing resource changes: %w", err)
+	}
+
+	// Process the resource changes
+	for _, resource := range resourceChanges {
+		// Skip data resources
+		if resource.Mode == "data" {
+			continue
+		}
+
+		// Check for replacements
+		isReplacement := false
+		for _, action := range resource.Change.Actions {
+			if action == "replace" {
+				isReplacement = true
+				resources.AddResource(model.ActionCreate, resource.Address)
+				resources.AddResource(model.ActionDestroy, resource.Address)
+				resources.SummaryAdds++
+				resources.SummaryDestroys++
+				break
+			}
+		}
+
+		if isReplacement {
+			continue
+		}
+
+		// Process standard actions
+		for _, action := range resource.Change.Actions {
+			switch action {
+			case "create":
+				resources.AddResource(model.ActionCreate, resource.Address)
+				resources.SummaryAdds++
+			case "update":
+				resources.AddResource(model.ActionUpdate, resource.Address)
+				resources.SummaryChanges++
+			case "delete":
+				resources.AddResource(model.ActionDestroy, resource.Address)
+				resources.SummaryDestroys++
+			}
+		}
+	}
+
+	resources.FoundSummary = true
 	resources.HasDetailedResources = true
 	return resources, nil
 }

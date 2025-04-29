@@ -174,12 +174,58 @@ terraform plan -out=tfplan && terraform show -json tfplan | tee tfplan.json | te
 Add this to your shell config (~/.zshrc for zsh):
 
 ```bash
-# Function to create and filter terraform plan
+# Usage: tfp -var-file=prod.tfvars
+
+# Function to create and filter terraform plan with workaround for JSON parsing issues
 tfp() {
-  terraform plan -out=tfplan $@ && terraform show -json tfplan | terraform-plan-filter
+  # First, save the current plan to a file
+  echo "📝 Generating Terraform plan..."
+  terraform plan -out=tfplan $@ || return 1
+  
+  # Convert the plan to JSON and save it to a file
+  echo "💾 Converting plan to JSON..."
+  terraform show -json tfplan > tfplan.json || return 1
+  
+  # Generate the HTML summary directly using jq to pre-process the JSON
+  # This filters out the problematic provider_config section
+  echo "📊 Generating HTML summary..."
+  if command -v jq &>/dev/null; then
+    jq 'del(.configuration.provider_config)' tfplan.json > tfplan-filtered.json
+    cat tfplan-filtered.json | terraform-plan-filter --html --output tfplan-summary.html
+  else
+    # Fallback if jq is not installed
+    cat tfplan.json | terraform-plan-filter --html --output tfplan-summary.html || echo "⚠️ HTML summary generation failed, but continuing..."
+  fi
+  
+  # Generate text summary
+  echo "📋 Text summary:"
+  if command -v jq &>/dev/null; then
+    cat tfplan-filtered.json | terraform-plan-filter
+  else
+    cat tfplan.json | terraform-plan-filter || {
+      echo "⚠️ Text summary generation failed, trying to extract basic information..."
+      echo "Plan:" $(grep -A 1 "\"summary\":" tfplan.json | grep "\"total\":" | grep -o "[0-9]*") "changes total"
+    }
+  fi
+  
+  echo "✅ Done! HTML summary saved to: tfplan-summary.html"
 }
 
-# Usage: tfp -var-file=prod.tfvars
+# Function to apply the plan
+tfapply() {
+  echo "🚀 Applying Terraform plan..."
+  terraform apply "$@" tfplan
+}
+
+# Function to show the HTML summary in the browser
+tfopen() {
+  if [[ -f tfplan-summary.html ]]; then
+    echo "🌐 Opening HTML summary in browser..."
+    open tfplan-summary.html
+  else
+    echo "❌ Summary file not found! Run tfp first."
+  fi
+}
 ```
 
 ## 📦 Project Structure
