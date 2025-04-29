@@ -1,8 +1,8 @@
 # 🚀 Terraform Plan Filter
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/marc-poljak/terraform-plan-filter)](https://goreportcard.com/report/github.com/marc-poljak/terraform-plan-filter)
-[![License](https://img.shields.io/github/license/yourusername/terraform-plan-filter)](LICENSE)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/yourusername/terraform-plan-filter)](go.mod)
+[![License](https://img.shields.io/github/license/marc-poljak/terraform-plan-filter)](LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/marc-poljak/terraform-plan-filter)](go.mod)
 
 A lightweight CLI tool that streamlines Terraform plan output by filtering and displaying only the resource titles that will be created, updated, or destroyed, without all the verbose details.
 
@@ -12,13 +12,13 @@ When working with large Terraform projects, the plan output can be overwhelming 
 
 ## ✨ Features
 
-- 🔍 Filters Terraform `plan` output to show only resource titles
+- 🔍 Filters Terraform plan output to show only resource titles
 - 🎯 Categorizes resources first by action type (create, update, destroy)
 - 🎨 Groups resources by resource type (aws_s3_bucket, aws_instance, etc.)
 - 🌈 Colorized output (green for creations, yellow for updates, red for deletions)
 - 📊 Provides a total count of changes
 - 📱 Multiple output formats (text, JSON, HTML)
-- 🧰 Simple to use - just pipe your Terraform output to the tool
+- 🧰 Simple to use with Terraform JSON plan output
 
 ## 🛠️ Installation
 
@@ -38,40 +38,86 @@ make install
 
 ## 🚀 Usage
 
-Simply pipe your Terraform plan output to the tool:
+This tool processes Terraform plans in JSON format. Here's how to use it:
+
+### Basic Usage
 
 ```bash
-terraform plan | terraform-plan-filter
+# Step 1: Create a plan file
+terraform plan -out=tfplan
+
+# Step 2: Convert the plan to JSON and pipe to terraform-plan-filter
+terraform show -json tfplan | terraform-plan-filter
+```
+
+You can also save the JSON to a file and process it:
+
+```bash
+# Save the JSON plan to a file
+terraform show -json tfplan > tfplan.json
+
+# Process the JSON plan file
+terraform-plan-filter --plan tfplan.json
+```
+
+### Using with Terraform Variable Files (tfvars)
+
+When using variable files with your Terraform plans:
+
+```bash
+# Using with a tfvars file
+terraform plan -var-file=environments/prod.tfvars -out=tfplan
+terraform show -json tfplan | terraform-plan-filter
+```
+
+#### Multiple Variable Files
+
+```bash
+# Using multiple variable files
+terraform plan -var-file=environments/prod.tfvars -var-file=overrides.tfvars -out=tfplan
+terraform show -json tfplan | terraform-plan-filter
+```
+
+#### Saving JSON Output to a File
+
+```bash
+# Create a plan with variable files and save JSON output
+terraform plan -var-file=environments/prod.tfvars -out=tfplan
+terraform show -json tfplan > tfplan.json
+
+# Process the saved JSON file
+terraform-plan-filter --plan tfplan.json
 ```
 
 ### Command Line Flags
 
 ```
-Usage: terraform plan | terraform-plan-filter [options]
+Usage: terraform show -json tfplan | terraform-plan-filter [options]
 
 Options:
-  -no-color       Disable colored output
-  -json           Output in JSON format
-  -html           Output in HTML format
-  -output string  Output file (default: stdout)
-  -verbose        Show verbose output
+  -no-color        Disable colored output
+  -json            Output in JSON format
+  -html            Output in HTML format
+  -plan string     Terraform JSON plan file (default: stdin)
+  -output string   Output file (default: stdout)
+  -verbose         Show verbose output
 ```
 
-### Examples
-
-Basic usage with colored text output:
-```bash
-terraform plan | terraform-plan-filter
-```
+### Additional Examples
 
 Generate JSON output to a file:
 ```bash
-terraform plan -no-color | terraform-plan-filter --json --output plan.json
+terraform show -json tfplan | terraform-plan-filter --json --output plan.json
 ```
 
 Generate HTML report:
 ```bash
-terraform plan | terraform-plan-filter --html --output plan.html
+terraform show -json tfplan | terraform-plan-filter --html --output plan.html
+```
+
+Process a saved JSON plan file and output as HTML:
+```bash
+terraform-plan-filter --plan tfplan.json --output plan.html --html
 ```
 
 ### Example Output
@@ -96,6 +142,35 @@ RESOURCES TO DESTROY:
     - aws_cloudfront_distribution.legacy_cdn
 
 TOTAL CHANGES: 5
+
+Plan Summary: Plan: 2 to add, 2 to change, 1 to destroy.
+```
+
+### Alternative Workflows
+
+#### One-liner for quick checks
+
+```bash
+terraform plan -out=tfplan && terraform show -json tfplan | terraform-plan-filter
+```
+
+#### Save both plan and summary
+
+```bash
+terraform plan -out=tfplan && terraform show -json tfplan | tee tfplan.json | terraform-plan-filter
+```
+
+#### Create a shell function/alias
+
+Add this to your shell config (~/.zshrc for zsh):
+
+```bash
+# Function to create and filter terraform plan
+tfp() {
+  terraform plan -out=tfplan $@ && terraform show -json tfplan | terraform-plan-filter
+}
+
+# Usage: tfp -var-file=prod.tfvars
 ```
 
 ## 📦 Project Structure

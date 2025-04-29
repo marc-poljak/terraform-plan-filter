@@ -1,186 +1,180 @@
 package parser
 
 import (
-	"bufio"
+	"encoding/json"
+	"fmt"
 	"io"
-	"regexp"
-	"strconv"
+	"io/ioutil"
 	"strings"
 
 	"github.com/marc-poljak/terraform-plan-filter/internal/model"
 )
 
-// patternDefinition defines a regex pattern and its associated action
-type patternDefinition struct {
-	regex  *regexp.Regexp
-	action model.Action
-	double bool // If true, this matches resources that are both created and destroyed (replaced)
+// TerraformPlanJSON represents the structure of a Terraform plan in JSON format
+type TerraformPlanJSON struct {
+	FormatVersion    string `json:"format_version"`
+	TerraformVersion string `json:"terraform_version"`
+	Variables        map[string]struct {
+		Value json.RawMessage `json:"value"`
+	} `json:"variables"`
+	PlannedValues struct {
+		RootModule struct {
+			Resources []struct {
+				Address      string                 `json:"address"`
+				Mode         string                 `json:"mode"`
+				Type         string                 `json:"type"`
+				Name         string                 `json:"name"`
+				ProviderName string                 `json:"provider_name"`
+				Values       map[string]interface{} `json:"values"`
+			} `json:"resources"`
+			ChildModules []struct {
+				Address   string `json:"address"`
+				Resources []struct {
+					Address      string                 `json:"address"`
+					Mode         string                 `json:"mode"`
+					Type         string                 `json:"type"`
+					Name         string                 `json:"name"`
+					ProviderName string                 `json:"provider_name"`
+					Values       map[string]interface{} `json:"values"`
+				} `json:"resources"`
+			} `json:"child_modules"`
+		} `json:"root_module"`
+	} `json:"planned_values"`
+	ResourceChanges []struct {
+		Address      string `json:"address"`
+		Mode         string `json:"mode"`
+		Type         string `json:"type"`
+		Name         string `json:"name"`
+		ProviderName string `json:"provider_name"`
+		Change       struct {
+			Actions []string    `json:"actions"`
+			Before  interface{} `json:"before"`
+			After   interface{} `json:"after"`
+		} `json:"change"`
+	} `json:"resource_changes"`
+	OutputChanges map[string]struct {
+		Change struct {
+			Actions []string    `json:"actions"`
+			Before  interface{} `json:"before"`
+			After   interface{} `json:"after"`
+		} `json:"change"`
+	} `json:"output_changes"`
+	PriorState struct {
+		FormatVersion string `json:"format_version"`
+	} `json:"prior_state"`
+	Config struct {
+		ProviderConfig map[string]struct {
+			Name        string `json:"name"`
+			Expressions map[string]struct {
+				ConstantValue string `json:"constant_value"`
+			} `json:"expressions"`
+		} `json:"provider_config"`
+	} `json:"configuration"`
 }
 
-var (
-	// Patterns for different Terraform resource actions
-	patterns = []patternDefinition{
-		// Main resource patterns - these match the resource type and identifier
-		{regexp.MustCompile(`^\s*\+\s+(.+?)\s+{`), model.ActionCreate, false},
-		{regexp.MustCompile(`^\s*~\s+(.+?)\s+{`), model.ActionUpdate, false},
-		{regexp.MustCompile(`^\s*-\s+(.+?)\s+{`), model.ActionDestroy, false},
-		{regexp.MustCompile(`^(.+?)\s+will\s+be\s+created`), model.ActionCreate, false},
-		{regexp.MustCompile(`^(.+?)\s+will\s+be\s+updated\s+in-place`), model.ActionUpdate, false},
-		{regexp.MustCompile(`^(.+?)\s+will\s+be\s+destroyed`), model.ActionDestroy, false},
-		{regexp.MustCompile(`^(.+?)\s+must\s+be\s+replaced`), "", true}, // Special case for replacements
-
-		// Resource action patterns from Terraform 0.12+ format
-		{regexp.MustCompile(`^\s*#\s+(.+?)\s+will\s+be\s+created`), model.ActionCreate, false},
-		{regexp.MustCompile(`^\s*#\s+(.+?)\s+will\s+be\s+updated\s+in-place`), model.ActionUpdate, false},
-		{regexp.MustCompile(`^\s*#\s+(.+?)\s+will\s+be\s+destroyed`), model.ActionDestroy, false},
-		{regexp.MustCompile(`^\s*#\s+(.+?)\s+must\s+be\s+replaced`), "", true}, // Special case for replacements
-
-		// Module resource patterns - requires special handling
-		{regexp.MustCompile(`^\s*#\s+module\.(.+?)\s+will\s+be\s+created`), model.ActionCreate, false},
-		{regexp.MustCompile(`^\s*#\s+module\.(.+?)\s+will\s+be\s+updated\s+in-place`), model.ActionUpdate, false},
-		{regexp.MustCompile(`^\s*#\s+module\.(.+?)\s+will\s+be\s+destroyed`), model.ActionDestroy, false},
-		{regexp.MustCompile(`^\s*#\s+module\.(.+?)\s+must\s+be\s+replaced`), "", true}, // Special case for replacements
-
-		// Resource definition patterns
-		{regexp.MustCompile(`^\s*\+\s+resource\s+"([^"]+)"\s+"([^"]+)"\s+{`), model.ActionCreate, false},
-		{regexp.MustCompile(`^\s*~\s+resource\s+"([^"]+)"\s+"([^"]+)"\s+{`), model.ActionUpdate, false},
-		{regexp.MustCompile(`^\s*-\s+resource\s+"([^"]+)"\s+"([^"]+)"\s+{`), model.ActionDestroy, false},
-	}
-
-	// Resource identifier patterns
-	resourceIdentifierPattern = regexp.MustCompile(`^\s*(?:resource\s+)?"([^"]+)"\s+"([^"]+)"`)
-
-	// Module resource identifier pattern
-	moduleResourcePattern = regexp.MustCompile(`^\s*#\s+module\.(.+?)\.([^.]+?)\.([^.]+?)\s+will`)
-
-	// Data resource pattern - we want to ignore data resources
-	dataResourcePattern = regexp.MustCompile(`^\s*#?\s*data\s+`)
-
-	// Pattern for the plan summary line
-	planSummaryRegex = regexp.MustCompile(`Plan:\s+(\d+)\s+to\s+add,\s+(\d+)\s+to\s+change,\s+(\d+)\s+to\s+destroy`)
-
-	// New pattern to identify resource actions in detailed format
-	resourceActionPattern = regexp.MustCompile(`^\s*([\+\-~])\s+(.+?)\s+=(.*)$`)
-
-	// Pattern to identify block openings (which we want to filter out)
-	blockOpeningPattern = regexp.MustCompile(`^\s*([a-z_]+)\s+{$`)
-
-	// Pattern to identify non-resource blocks like "statement", "action", etc.
-	nonResourceBlockPattern = regexp.MustCompile(`^\s*([a-z_]+)\s*(\{|\()`)
-
-	// Pattern to identify tag blocks
-	tagPattern = regexp.MustCompile(`^\s*(tags|tags_all)\s+(=|{)`)
-)
-
-// isNonResourceBlock checks if a line matches a block that shouldn't be treated as a resource
-func isNonResourceBlock(line string) bool {
-	// List of block types that shouldn't be treated as resources
-	nonResourceBlocks := []string{
-		"action", "statement", "visibility_config", "field_to_match",
-		"and_statement", "or_statement", "not_statement", "uri_path",
-		"text_transformation", "allow", "block", "rule", "parameter",
-		"setting", "alias", "override_action", "none", "regular_expression",
-		"regex_pattern_set_reference_statement", "label_match_statement",
-		"rule_group_reference_statement", "regex_match_statement", "tags",
-		"tags_all",
-	}
-
-	for _, blockType := range nonResourceBlocks {
-		if strings.Contains(line, blockType+" ") ||
-			strings.Contains(line, blockType+"{") ||
-			strings.Contains(line, blockType+"}") ||
-			strings.HasSuffix(line, blockType) {
-			return true
-		}
-	}
-
-	// Check for tag blocks specifically
-	if tagPattern.MatchString(line) {
-		return true
-	}
-
-	return nonResourceBlockPattern.MatchString(line)
-}
-
-// extractResourceIdentifier tries to extract a proper resource identifier from a line
-func extractResourceIdentifier(line string) (string, bool) {
-	// Check for module.X.Y.Z format
-	if moduleMatch := moduleResourcePattern.FindStringSubmatch(line); len(moduleMatch) > 3 {
-		return "module." + moduleMatch[1] + "." + moduleMatch[2] + "." + moduleMatch[3], true
-	}
-
-	// Check for resource "type" "name" format
-	if resourceMatch := resourceIdentifierPattern.FindStringSubmatch(line); len(resourceMatch) > 2 {
-		return resourceMatch[1] + "." + resourceMatch[2], true
-	}
-
-	// Special case for +/- resource "type" "name"
-	resourceDefPattern := regexp.MustCompile(`^\s*[\+\-~]\s+resource\s+"([^"]+)"\s+"([^"]+)"`)
-	if resourceMatch := resourceDefPattern.FindStringSubmatch(line); len(resourceMatch) > 2 {
-		return resourceMatch[1] + "." + resourceMatch[2], true
-	}
-
-	// If no match, return the original line
-	return line, false
-}
-
-// isDataResource checks if a line represents a data resource
-func isDataResource(line string) bool {
-	return dataResourcePattern.MatchString(line)
-}
-
-// ParseTerraformPlan parses Terraform plan output and returns a ResourceCollection
+// ParseTerraformPlan parses a Terraform plan in JSON format
 func ParseTerraformPlan(reader io.Reader) (*model.ResourceCollection, error) {
 	resources := model.NewResourceCollection()
-	scanner := bufio.NewScanner(reader)
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	// Read the entire input
+	data, err := ioutil.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
 
+	// Parse the JSON
+	var plan TerraformPlanJSON
+	if err := json.Unmarshal(data, &plan); err != nil {
+		// Better error message for non-JSON input
+		if strings.HasPrefix(string(data), "Terraform will perform") {
+			return nil, fmt.Errorf("input appears to be text format, not JSON. Please use 'terraform show -json tfplan' to generate JSON output")
+		}
+		return nil, fmt.Errorf("error parsing JSON: %w", err)
+	}
+
+	// Process resource changes from the JSON plan
+	for _, resource := range plan.ResourceChanges {
 		// Skip data resources
-		if isDataResource(line) {
+		if resource.Mode == "data" {
 			continue
 		}
 
-		// Skip non-resource blocks
-		if isNonResourceBlock(line) {
+		// Check for special case: "no-op" actions (read-only)
+		if len(resource.Change.Actions) == 1 && resource.Change.Actions[0] == "no-op" {
 			continue
 		}
 
-		// Check for resource actions
-		for _, pattern := range patterns {
-			if matches := pattern.regex.FindStringSubmatch(line); len(matches) > 1 {
-				resourceIdentifier := matches[1]
-
-				// Try to extract a better identifier if available
-				betterIdentifier, found := extractResourceIdentifier(line)
-				if found {
-					resourceIdentifier = betterIdentifier
-				}
-
-				if pattern.double {
-					// This is a replacement (both create and destroy)
-					resources.AddReplacement(resourceIdentifier)
-				} else {
-					// Regular action
-					resources.AddResource(pattern.action, resourceIdentifier)
-				}
+		// Track if this is a replacement (will be handled specially)
+		isReplacement := false
+		for _, action := range resource.Change.Actions {
+			if action == "replace" {
+				isReplacement = true
 				break
 			}
 		}
 
-		// Check for plan summary line
-		if matches := planSummaryRegex.FindStringSubmatch(line); len(matches) > 1 {
-			resources.FoundSummary = true
-			resources.SummaryAdds, _ = strconv.Atoi(matches[1])
-			resources.SummaryChanges, _ = strconv.Atoi(matches[2])
-			resources.SummaryDestroys, _ = strconv.Atoi(matches[3])
+		// Process replacement resources specially to ensure they appear in both create and destroy
+		if isReplacement {
+			resources.AddResource(model.ActionCreate, resource.Address)
+			resources.AddResource(model.ActionDestroy, resource.Address)
+			continue
+		}
+
+		// Process standard resources based on their actions
+		for _, action := range resource.Change.Actions {
+			switch action {
+			case "create":
+				resources.AddResource(model.ActionCreate, resource.Address)
+			case "update":
+				resources.AddResource(model.ActionUpdate, resource.Address)
+			case "delete":
+				resources.AddResource(model.ActionDestroy, resource.Address)
+			}
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	// Set summary values by counting the resource changes
+	resources.FoundSummary = true
+
+	// Reset summary counters
+	resources.SummaryAdds = 0
+	resources.SummaryChanges = 0
+	resources.SummaryDestroys = 0
+
+	// Count resources by action type
+	for _, resource := range plan.ResourceChanges {
+		if resource.Mode == "data" {
+			continue
+		}
+
+		// Special handling for replacements
+		isReplacement := false
+		for _, action := range resource.Change.Actions {
+			if action == "replace" {
+				isReplacement = true
+				break
+			}
+		}
+
+		if isReplacement {
+			resources.SummaryAdds++
+			resources.SummaryDestroys++
+			continue
+		}
+
+		// Count standard actions
+		for _, action := range resource.Change.Actions {
+			switch action {
+			case "create":
+				resources.SummaryAdds++
+			case "update":
+				resources.SummaryChanges++
+			case "delete":
+				resources.SummaryDestroys++
+			}
+		}
 	}
 
+	resources.HasDetailedResources = true
 	return resources, nil
 }

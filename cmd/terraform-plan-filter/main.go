@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/marc-poljak/terraform-plan-filter/internal/formatter"
 	"github.com/marc-poljak/terraform-plan-filter/internal/parser"
@@ -16,6 +17,7 @@ func main() {
 		noColor    bool
 		jsonOut    bool
 		htmlOut    bool
+		planFile   string
 		outputFile string
 		verbose    bool
 	)
@@ -24,6 +26,7 @@ func main() {
 	flag.BoolVar(&noColor, "no-color", false, "Disable colored output")
 	flag.BoolVar(&jsonOut, "json", false, "Output in JSON format")
 	flag.BoolVar(&htmlOut, "html", false, "Output in HTML format")
+	flag.StringVar(&planFile, "plan", "", "Terraform JSON plan file (default: stdin)")
 	flag.StringVar(&outputFile, "output", "", "Output file (default: stdout)")
 	flag.BoolVar(&verbose, "verbose", false, "Show verbose output")
 	flag.Parse()
@@ -33,14 +36,43 @@ func main() {
 		noColor = true
 	}
 
-	// Set up input, default to stdin
-	reader := bufio.NewReader(os.Stdin)
+	// Set up input source
+	var err error
+	var inputFile *os.File
+
+	if planFile != "" {
+		// Check if the file exists
+		if _, err := os.Stat(planFile); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Error: Plan file %s does not exist\n", planFile)
+			os.Exit(1)
+		}
+
+		// Open the specified plan file
+		inputFile, err = os.Open(planFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error opening plan file: %v\n", err)
+			os.Exit(1)
+		}
+		defer inputFile.Close()
+	} else {
+		// Use stdin
+		inputFile = os.Stdin
+	}
 
 	// Parse the Terraform plan
-	result, err := parser.ParseTerraformPlan(reader)
+	result, err := parser.ParseTerraformPlan(inputFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing Terraform plan: %v\n", err)
-		os.Exit(1)
+		if strings.Contains(err.Error(), "input appears to be text format") {
+			fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
+			fmt.Fprintf(os.Stderr, "This tool now only supports JSON-formatted Terraform plans.\n")
+			fmt.Fprintf(os.Stderr, "Please use the following commands:\n")
+			fmt.Fprintf(os.Stderr, "  terraform plan -out=tfplan\n")
+			fmt.Fprintf(os.Stderr, "  terraform show -json tfplan | terraform-plan-filter\n")
+			os.Exit(1)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error parsing Terraform plan: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Determine output writer
@@ -82,12 +114,6 @@ func main() {
 	writer.WriteString(output)
 	writer.Flush()
 
-	// Print summary message if using verbose and details weren't found
-	if verbose && !result.HasDetailedResources && result.FoundSummary && result.TotalChanges() > 0 {
-		fmt.Fprintln(os.Stderr, "\nNote: Resource details weren't found in the output.")
-		fmt.Fprintln(os.Stderr, "To see full resource details, try running with:")
-		fmt.Fprintln(os.Stderr, "terraform plan -no-color | terraform-plan-filter")
-	}
-
+	// Print debug information if verbose
 	util.PrintDebugInfo(result, verbose)
 }
