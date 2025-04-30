@@ -21,7 +21,33 @@ type Options struct {
 func FormatText(resources *model.ResourceCollection, opts Options) (string, error) {
 	var sb strings.Builder
 
-	// Header
+	// Format the header
+	formatTextHeader(&sb, opts)
+
+	// If we have detailed resources, show them grouped by action then type
+	if resources.HasDetailedResources {
+		// Display resources for each action type in order
+		formatActionResourcesText(&sb, resources, model.ActionCreate, "RESOURCES TO CREATE", opts)
+		formatActionResourcesText(&sb, resources, model.ActionUpdate, "RESOURCES TO UPDATE", opts)
+		formatActionResourcesText(&sb, resources, model.ActionDestroy, "RESOURCES TO DESTROY", opts)
+	} else if resources.FoundSummary {
+		// No detailed resources, but we have a summary
+		formatSummaryOnlyText(&sb, resources, opts)
+	}
+
+	// Format total changes
+	formatTotalChangesText(&sb, resources, opts)
+
+	// If we have a summary directly from the plan, show it
+	if resources.FoundSummary {
+		formatPlanSummaryText(&sb, resources, opts)
+	}
+
+	return sb.String(), nil
+}
+
+// formatTextHeader adds the header section to the text output
+func formatTextHeader(sb *strings.Builder, opts Options) {
 	sb.WriteString("\n")
 	if opts.UseColors {
 		sb.WriteString(util.BoldText("=== TERRAFORM PLAN SUMMARY ===", opts.UseColors))
@@ -29,159 +55,181 @@ func FormatText(resources *model.ResourceCollection, opts Options) (string, erro
 		sb.WriteString("=== TERRAFORM PLAN SUMMARY ===")
 	}
 	sb.WriteString("\n\n")
+}
 
-	// If we have detailed resources, show them grouped by action then type
-	if resources.HasDetailedResources {
-		// Display resources for each action in order: create, update, destroy
-		displayActionResources := func(action model.Action, actionLabel string) {
-			actionResources := resources.GetResourcesForAction(action)
-			if len(actionResources) == 0 {
-				return
-			}
+// formatActionResourcesText formats resources for a specific action type
+func formatActionResourcesText(sb *strings.Builder, resources *model.ResourceCollection, action model.Action, actionLabel string, opts Options) {
+	actionResources := resources.GetResourcesForAction(action)
+	if len(actionResources) == 0 {
+		return
+	}
 
-			// Get color and symbol for this action
-			color := util.GetColorForAction(action)
-			symbol := util.GetSymbolForAction(action)
+	// Get color and symbol for this action
+	color := util.GetColorForAction(action)
+	symbol := util.GetSymbolForAction(action)
 
-			// Group resources by type
-			typeMap := resources.ResourcesByType(action)
+	// Group resources by type
+	typeMap := resources.ResourcesByType(action)
 
-			// Get sorted type list
-			types := make([]string, 0, len(typeMap))
-			for t := range typeMap {
-				types = append(types, t)
-			}
-			sort.Strings(types)
+	// Get sorted type list
+	types := getSortedResourceTypes(typeMap)
 
-			// Print action header
-			if opts.UseColors {
-				sb.WriteString(util.BoldText(actionLabel+":", opts.UseColors))
-			} else {
-				sb.WriteString(actionLabel + ":")
-			}
-			sb.WriteString("\n")
+	// Print action header
+	if opts.UseColors {
+		sb.WriteString(util.BoldText(actionLabel+":", opts.UseColors))
+	} else {
+		sb.WriteString(actionLabel + ":")
+	}
+	sb.WriteString("\n")
 
-			// First print module resources if they exist
-			if moduleResources, ok := typeMap["module"]; ok && len(moduleResources) > 0 {
-				// Print type subheader
-				if opts.UseColors {
-					sb.WriteString(fmt.Sprintf("  %s# MODULE RESOURCES:%s\n",
-						util.ColorBold, util.ColorReset))
-				} else {
-					sb.WriteString("  # MODULE RESOURCES:\n")
-				}
+	// Handle module resources first if they exist
+	if hasModuleResources(typeMap) {
+		formatModuleResourcesText(sb, typeMap, color, symbol, opts)
+		// Filter out "module" from types since we've already processed it
+		types = filterOutModuleType(types)
+	}
 
-				// Print module resources
-				for _, resource := range moduleResources {
-					if opts.UseColors {
-						sb.WriteString(fmt.Sprintf("    %s%s %s%s\n",
-							color, symbol, resource, util.ColorReset))
-					} else {
-						sb.WriteString(fmt.Sprintf("    %s %s\n", symbol, resource))
-					}
-				}
-				sb.WriteString("\n")
+	// Format resources by type (excluding modules which we've already handled)
+	formatResourcesByTypeText(sb, types, typeMap, color, symbol, opts)
+}
 
-				// Remove "module" from the types list since we've already processed it
-				var filteredTypes []string
-				for _, t := range types {
-					if t != "module" {
-						filteredTypes = append(filteredTypes, t)
-					}
-				}
-				types = filteredTypes
-			}
+// getSortedResourceTypes returns a sorted slice of resource types
+func getSortedResourceTypes(typeMap map[string][]string) []string {
+	types := make([]string, 0, len(typeMap))
+	for t := range typeMap {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	return types
+}
 
-			// Print resources grouped by type (excluding modules which we've already handled)
-			for _, resourceType := range types {
-				resources := typeMap[resourceType]
+// hasModuleResources checks if there are module resources in the type map
+func hasModuleResources(typeMap map[string][]string) bool {
+	moduleResources, ok := typeMap["module"]
+	return ok && len(moduleResources) > 0
+}
 
-				// Skip empty resource types
-				if len(resources) == 0 {
-					continue
-				}
+// filterOutModuleType removes "module" from the types slice
+func filterOutModuleType(types []string) []string {
+	var filteredTypes []string
+	for _, t := range types {
+		if t != "module" {
+			filteredTypes = append(filteredTypes, t)
+		}
+	}
+	return filteredTypes
+}
 
-				// Print type subheader
-				if opts.UseColors {
-					sb.WriteString(fmt.Sprintf("  %s# %s RESOURCES:%s\n",
-						util.ColorBold, strings.ToUpper(resourceType), util.ColorReset))
-				} else {
-					sb.WriteString(fmt.Sprintf("  # %s RESOURCES:\n", strings.ToUpper(resourceType)))
-				}
+// formatModuleResourcesText formats module resources
+func formatModuleResourcesText(sb *strings.Builder, typeMap map[string][]string, color, symbol string, opts Options) {
+	moduleResources := typeMap["module"]
 
-				// Print resources of this type
-				for _, resource := range resources {
-					if opts.UseColors {
-						sb.WriteString(fmt.Sprintf("    %s%s %s%s\n",
-							color, symbol, resource, util.ColorReset))
-					} else {
-						sb.WriteString(fmt.Sprintf("    %s %s\n", symbol, resource))
-					}
-				}
-				sb.WriteString("\n")
-			}
+	// Print type subheader
+	if opts.UseColors {
+		fmt.Fprintf(sb, "  %s# MODULE RESOURCES:%s\n",
+			util.ColorBold, util.ColorReset)
+	} else {
+		sb.WriteString("  # MODULE RESOURCES:\n")
+	}
+
+	// Print module resources
+	for _, resource := range moduleResources {
+		if opts.UseColors {
+			fmt.Fprintf(sb, "    %s%s %s%s\n",
+				color, symbol, resource, util.ColorReset)
+		} else {
+			fmt.Fprintf(sb, "    %s %s\n", symbol, resource)
+		}
+	}
+	sb.WriteString("\n")
+}
+
+// formatResourcesByTypeText formats resources grouped by type
+func formatResourcesByTypeText(sb *strings.Builder, types []string, typeMap map[string][]string, color, symbol string, opts Options) {
+	for _, resourceType := range types {
+		resources := typeMap[resourceType]
+
+		// Skip empty resource types
+		if len(resources) == 0 {
+			continue
 		}
 
-		// Display in order: create, update, destroy
-		displayActionResources(model.ActionCreate, "RESOURCES TO CREATE")
-		displayActionResources(model.ActionUpdate, "RESOURCES TO UPDATE")
-		displayActionResources(model.ActionDestroy, "RESOURCES TO DESTROY")
-	} else if resources.FoundSummary {
-		// No detailed resources, but we have a summary
-		if resources.SummaryAdds > 0 {
-			if opts.UseColors {
-				sb.WriteString(fmt.Sprintf("%sRESOURCES TO CREATE:%s %d (details not available)\n\n",
-					util.ColorBold, util.ColorReset, resources.SummaryAdds))
-			} else {
-				sb.WriteString(fmt.Sprintf("RESOURCES TO CREATE: %d (details not available)\n\n",
-					resources.SummaryAdds))
-			}
+		// Print type subheader
+		if opts.UseColors {
+			fmt.Fprintf(sb, "  %s# %s RESOURCES:%s\n",
+				util.ColorBold, strings.ToUpper(resourceType), util.ColorReset)
+		} else {
+			fmt.Fprintf(sb, "  # %s RESOURCES:\n", strings.ToUpper(resourceType))
 		}
 
-		if resources.SummaryChanges > 0 {
+		// Print resources of this type
+		for _, resource := range resources {
 			if opts.UseColors {
-				sb.WriteString(fmt.Sprintf("%sRESOURCES TO UPDATE:%s %d (details not available)\n\n",
-					util.ColorBold, util.ColorReset, resources.SummaryChanges))
+				fmt.Fprintf(sb, "    %s%s %s%s\n",
+					color, symbol, resource, util.ColorReset)
 			} else {
-				sb.WriteString(fmt.Sprintf("RESOURCES TO UPDATE: %d (details not available)\n\n",
-					resources.SummaryChanges))
+				fmt.Fprintf(sb, "    %s %s\n", symbol, resource)
 			}
 		}
+		sb.WriteString("\n")
+	}
+}
 
-		if resources.SummaryDestroys > 0 {
-			if opts.UseColors {
-				sb.WriteString(fmt.Sprintf("%sRESOURCES TO DESTROY:%s %d (details not available)\n\n",
-					util.ColorBold, util.ColorReset, resources.SummaryDestroys))
-			} else {
-				sb.WriteString(fmt.Sprintf("RESOURCES TO DESTROY: %d (details not available)\n\n",
-					resources.SummaryDestroys))
-			}
+// formatSummaryOnlyText formats the summary when no detailed resources are available
+func formatSummaryOnlyText(sb *strings.Builder, resources *model.ResourceCollection, opts Options) {
+	if resources.SummaryAdds > 0 {
+		if opts.UseColors {
+			fmt.Fprintf(sb, "%sRESOURCES TO CREATE:%s %d (details not available)\n\n",
+				util.ColorBold, util.ColorReset, resources.SummaryAdds)
+		} else {
+			fmt.Fprintf(sb, "RESOURCES TO CREATE: %d (details not available)\n\n",
+				resources.SummaryAdds)
 		}
 	}
 
-	// Total changes
+	if resources.SummaryChanges > 0 {
+		if opts.UseColors {
+			fmt.Fprintf(sb, "%sRESOURCES TO UPDATE:%s %d (details not available)\n\n",
+				util.ColorBold, util.ColorReset, resources.SummaryChanges)
+		} else {
+			fmt.Fprintf(sb, "RESOURCES TO UPDATE: %d (details not available)\n\n",
+				resources.SummaryChanges)
+		}
+	}
+
+	if resources.SummaryDestroys > 0 {
+		if opts.UseColors {
+			fmt.Fprintf(sb, "%sRESOURCES TO DESTROY:%s %d (details not available)\n\n",
+				util.ColorBold, util.ColorReset, resources.SummaryDestroys)
+		} else {
+			fmt.Fprintf(sb, "RESOURCES TO DESTROY: %d (details not available)\n\n",
+				resources.SummaryDestroys)
+		}
+	}
+}
+
+// formatTotalChangesText formats the total number of changes
+func formatTotalChangesText(sb *strings.Builder, resources *model.ResourceCollection, opts Options) {
 	totalChanges := resources.TotalChanges()
 	if opts.UseColors {
-		sb.WriteString(fmt.Sprintf("%sTOTAL CHANGES:%s %d\n",
-			util.ColorBold, util.ColorReset, totalChanges))
+		fmt.Fprintf(sb, "%sTOTAL CHANGES:%s %d\n",
+			util.ColorBold, util.ColorReset, totalChanges)
 	} else {
-		sb.WriteString(fmt.Sprintf("TOTAL CHANGES: %d\n", totalChanges))
+		fmt.Fprintf(sb, "TOTAL CHANGES: %d\n", totalChanges)
 	}
+}
 
-	// If we have a summary directly from the plan, show it
-	if resources.FoundSummary {
-		planSummary := fmt.Sprintf("Plan: %d to add, %d to change, %d to destroy.",
-			resources.SummaryAdds, resources.SummaryChanges, resources.SummaryDestroys)
+// formatPlanSummaryText formats the plan summary line
+func formatPlanSummaryText(sb *strings.Builder, resources *model.ResourceCollection, opts Options) {
+	planSummary := fmt.Sprintf("Plan: %d to add, %d to change, %d to destroy.",
+		resources.SummaryAdds, resources.SummaryChanges, resources.SummaryDestroys)
 
-		if opts.UseColors {
-			sb.WriteString(fmt.Sprintf("\n%sPlan Summary:%s %s\n",
-				util.ColorBold, util.ColorReset, planSummary))
-		} else {
-			sb.WriteString(fmt.Sprintf("\nPlan Summary: %s\n", planSummary))
-		}
+	if opts.UseColors {
+		fmt.Fprintf(sb, "\n%sPlan Summary:%s %s\n",
+			util.ColorBold, util.ColorReset, planSummary)
+	} else {
+		fmt.Fprintf(sb, "\nPlan Summary: %s\n", planSummary)
 	}
-
-	return sb.String(), nil
 }
 
 // FormatJSON formats the resource collection as JSON
@@ -227,6 +275,38 @@ func FormatJSON(resources *model.ResourceCollection) (string, error) {
 func FormatHTML(resources *model.ResourceCollection) (string, error) {
 	var sb strings.Builder
 
+	// Write HTML header and styles
+	writeHTMLHeader(&sb)
+
+	// Write the main content
+	sb.WriteString("    <h1>Terraform Plan Summary</h1>\n")
+	sb.WriteString("    <div class=\"summary\">\n")
+	sb.WriteString(fmt.Sprintf("        <p><strong>Total changes:</strong> %d</p>\n", resources.TotalChanges()))
+
+	// If we have detailed resources
+	if resources.HasDetailedResources {
+		// Render sections for create, update, destroy actions
+		renderHTMLActionSection(&sb, resources, model.ActionCreate, "Create", "create")
+		renderHTMLActionSection(&sb, resources, model.ActionUpdate, "Update", "update")
+		renderHTMLActionSection(&sb, resources, model.ActionDestroy, "Destroy", "destroy")
+	} else if resources.FoundSummary {
+		// No detailed resources, but we have a summary
+		writeHTMLSummaryOnly(&sb, resources)
+	}
+
+	// Write plan summary if available
+	if resources.FoundSummary {
+		writeHTMLPlanSummary(&sb, resources)
+	}
+
+	// Add timestamp and close HTML
+	writeHTMLFooter(&sb)
+
+	return sb.String(), nil
+}
+
+// writeHTMLHeader writes the HTML header and styles
+func writeHTMLHeader(sb *strings.Builder) {
 	sb.WriteString(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -303,110 +383,99 @@ func FormatHTML(resources *model.ResourceCollection) (string, error) {
     </style>
 </head>
 <body>
-    <h1>Terraform Plan Summary</h1>
-    <div class="summary">
-        <p><strong>Total changes:</strong> `)
+`)
+}
 
-	sb.WriteString(fmt.Sprintf("%d</p>\n", resources.TotalChanges()))
-
-	// If we have detailed resources
-	if resources.HasDetailedResources {
-		// Function to render a section for an action
-		renderActionSection := func(action model.Action, actionName, colorClass string) {
-			actionResources := resources.GetResourcesForAction(action)
-			if len(actionResources) == 0 {
-				return
-			}
-
-			sb.WriteString(fmt.Sprintf("    <div class=\"action-group %s\">\n", colorClass))
-			sb.WriteString(fmt.Sprintf("        <h2>Resources to %s</h2>\n", strings.ToLower(actionName)))
-
-			// Group by resource type
-			typeMap := resources.ResourcesByType(action)
-
-			// Sort types
-			types := make([]string, 0, len(typeMap))
-			for t := range typeMap {
-				types = append(types, t)
-			}
-			sort.Strings(types)
-
-			// Special handling for module resources
-			if moduleResources, ok := typeMap["module"]; ok && len(moduleResources) > 0 {
-				sb.WriteString("        <div class=\"resource-type\">MODULE RESOURCES</div>\n")
-
-				for _, resource := range moduleResources {
-					sb.WriteString(fmt.Sprintf("        <div class=\"resource\">%s</div>\n", resource))
-				}
-
-				// Remove module from the types list
-				var filteredTypes []string
-				for _, t := range types {
-					if t != "module" {
-						filteredTypes = append(filteredTypes, t)
-					}
-				}
-				types = filteredTypes
-			}
-
-			// Render each type
-			for _, resourceType := range types {
-				resources := typeMap[resourceType]
-
-				// Skip empty resource types
-				if len(resources) == 0 {
-					continue
-				}
-
-				sb.WriteString(fmt.Sprintf("        <div class=\"resource-type\">%s</div>\n",
-					strings.ToUpper(resourceType)))
-
-				for _, resource := range resources {
-					sb.WriteString(fmt.Sprintf("        <div class=\"resource\">%s</div>\n", resource))
-				}
-			}
-
-			sb.WriteString("    </div>\n")
-		}
-
-		renderActionSection(model.ActionCreate, "Create", "create")
-		renderActionSection(model.ActionUpdate, "Update", "update")
-		renderActionSection(model.ActionDestroy, "Destroy", "destroy")
-	} else if resources.FoundSummary {
-		// No detailed resources, but we have a summary
-		sb.WriteString("    <div class=\"summary-details\">\n")
-
-		if resources.SummaryAdds > 0 {
-			sb.WriteString(fmt.Sprintf("        <p><strong>Resources to create:</strong> %d (details not available)</p>\n",
-				resources.SummaryAdds))
-		}
-
-		if resources.SummaryChanges > 0 {
-			sb.WriteString(fmt.Sprintf("        <p><strong>Resources to update:</strong> %d (details not available)</p>\n",
-				resources.SummaryChanges))
-		}
-
-		if resources.SummaryDestroys > 0 {
-			sb.WriteString(fmt.Sprintf("        <p><strong>Resources to destroy:</strong> %d (details not available)</p>\n",
-				resources.SummaryDestroys))
-		}
-
-		sb.WriteString("    </div>\n")
+// renderHTMLActionSection renders an HTML section for a specific action
+func renderHTMLActionSection(sb *strings.Builder, resources *model.ResourceCollection, action model.Action, actionName, colorClass string) {
+	actionResources := resources.GetResourcesForAction(action)
+	if len(actionResources) == 0 {
+		return
 	}
 
-	// Plan summary
-	if resources.FoundSummary {
-		planSummary := fmt.Sprintf("Plan: %d to add, %d to change, %d to destroy.",
-			resources.SummaryAdds, resources.SummaryChanges, resources.SummaryDestroys)
+	fmt.Fprintf(sb, "    <div class=\"action-group %s\">\n", colorClass)
+	fmt.Fprintf(sb, "        <h2>Resources to %s</h2>\n", strings.ToLower(actionName))
 
-		sb.WriteString(fmt.Sprintf("    <div class=\"plan-summary\">%s</div>\n", planSummary))
+	// Group by resource type
+	typeMap := resources.ResourcesByType(action)
+
+	// Sort types
+	types := getSortedResourceTypes(typeMap)
+
+	// Special handling for module resources
+	if hasModuleResources(typeMap) {
+		writeHTMLModuleResources(sb, typeMap)
+		types = filterOutModuleType(types)
 	}
 
-	// Timestamp
+	// Write resources by type
+	writeHTMLResourcesByType(sb, types, typeMap)
+
+	sb.WriteString("    </div>\n")
+}
+
+// writeHTMLModuleResources writes HTML for module resources
+func writeHTMLModuleResources(sb *strings.Builder, typeMap map[string][]string) {
+	moduleResources := typeMap["module"]
+	sb.WriteString("        <div class=\"resource-type\">MODULE RESOURCES</div>\n")
+
+	for _, resource := range moduleResources {
+		fmt.Fprintf(sb, "        <div class=\"resource\">%s</div>\n", resource)
+	}
+}
+
+// writeHTMLResourcesByType writes HTML for resources grouped by type
+func writeHTMLResourcesByType(sb *strings.Builder, types []string, typeMap map[string][]string) {
+	for _, resourceType := range types {
+		resources := typeMap[resourceType]
+
+		// Skip empty resource types
+		if len(resources) == 0 {
+			continue
+		}
+
+		fmt.Fprintf(sb, "        <div class=\"resource-type\">%s</div>\n",
+			strings.ToUpper(resourceType))
+
+		for _, resource := range resources {
+			fmt.Fprintf(sb, "        <div class=\"resource\">%s</div>\n", resource)
+		}
+	}
+}
+
+// writeHTMLSummaryOnly writes HTML for when only summary information is available
+func writeHTMLSummaryOnly(sb *strings.Builder, resources *model.ResourceCollection) {
+	sb.WriteString("    <div class=\"summary-details\">\n")
+
+	if resources.SummaryAdds > 0 {
+		fmt.Fprintf(sb, "        <p><strong>Resources to create:</strong> %d (details not available)</p>\n",
+			resources.SummaryAdds)
+	}
+
+	if resources.SummaryChanges > 0 {
+		fmt.Fprintf(sb, "        <p><strong>Resources to update:</strong> %d (details not available)</p>\n",
+			resources.SummaryChanges)
+	}
+
+	if resources.SummaryDestroys > 0 {
+		fmt.Fprintf(sb, "        <p><strong>Resources to destroy:</strong> %d (details not available)</p>\n",
+			resources.SummaryDestroys)
+	}
+
+	sb.WriteString("    </div>\n")
+}
+
+// writeHTMLPlanSummary writes the HTML plan summary line
+func writeHTMLPlanSummary(sb *strings.Builder, resources *model.ResourceCollection) {
+	planSummary := fmt.Sprintf("Plan: %d to add, %d to change, %d to destroy.",
+		resources.SummaryAdds, resources.SummaryChanges, resources.SummaryDestroys)
+
+	fmt.Fprintf(sb, "    <div class=\"plan-summary\">%s</div>\n", planSummary)
+}
+
+// writeHTMLFooter writes the timestamp and closing HTML tags
+func writeHTMLFooter(sb *strings.Builder) {
 	currentTime := time.Now().Format("January 2, 2006 15:04:05")
-	sb.WriteString(fmt.Sprintf("    <div class=\"timestamp\">Report generated on %s</div>\n", currentTime))
-
+	fmt.Fprintf(sb, "    <div class=\"timestamp\">Report generated on %s</div>\n", currentTime)
 	sb.WriteString("</body>\n</html>")
-
-	return sb.String(), nil
 }
