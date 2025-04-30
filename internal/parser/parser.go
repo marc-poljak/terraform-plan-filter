@@ -83,61 +83,111 @@ func ParseTerraformPlan(reader io.Reader) (*model.ResourceCollection, error) {
 		return nil, err
 	}
 
-	// Parse the JSON
+	// Check if this is a text plan instead of JSON
+	if isTextPlan(data) {
+		return nil, fmt.Errorf("input appears to be text format, not JSON. Please use 'terraform show -json tfplan' to generate JSON output")
+	}
+
+	// Attempt to parse the full JSON structure
 	var plan TerraformPlanJSON
 	if err := json.Unmarshal(data, &plan); err != nil {
-		// Handle more gracefully if the JSON structure doesn't match our expectations
-		// First, check if this is a text plan instead of JSON
-		if strings.HasPrefix(string(data), "Terraform will perform") {
-			return nil, fmt.Errorf("input appears to be text format, not JSON. Please use 'terraform show -json tfplan' to generate JSON output")
-		}
-
-		// Try a more flexible approach to at least extract resource changes
+		// Try a more flexible approach if full parsing fails
 		return parseResourceChangesOnly(data)
 	}
 
-	// Process resource changes from the JSON plan
-	for _, resource := range plan.ResourceChanges {
+	// Process the resource changes
+	processResourceChanges(resources, plan.ResourceChanges)
+
+	// Set the summary flags and counters
+	calculateSummaryValues(resources, plan.ResourceChanges)
+
+	resources.HasDetailedResources = true
+	return resources, nil
+}
+
+// isTextPlan checks if the input data is in text format rather than JSON
+func isTextPlan(data []byte) bool {
+	return strings.HasPrefix(string(data), "Terraform will perform")
+}
+
+// processResourceChanges processes the resource changes from the Terraform plan
+func processResourceChanges(resources *model.ResourceCollection, resourceChanges []struct {
+	Address      string `json:"address"`
+	Mode         string `json:"mode"`
+	Type         string `json:"type"`
+	Name         string `json:"name"`
+	ProviderName string `json:"provider_name"`
+	Change       struct {
+		Actions []string    `json:"actions"`
+		Before  interface{} `json:"before"`
+		After   interface{} `json:"after"`
+	} `json:"change"`
+}) {
+	for _, resource := range resourceChanges {
 		// Skip data resources
 		if resource.Mode == "data" {
 			continue
 		}
 
 		// Check for special case: "no-op" actions (read-only)
-		if len(resource.Change.Actions) == 1 && resource.Change.Actions[0] == "no-op" {
+		if isNoOpAction(resource.Change.Actions) {
 			continue
 		}
 
-		// Track if this is a replacement (will be handled specially)
-		isReplacement := false
-		for _, action := range resource.Change.Actions {
-			if action == "replace" {
-				isReplacement = true
-				break
-			}
-		}
-
-		// Process replacement resources specially to ensure they appear in both create and destroy
-		if isReplacement {
+		// Process replacement resources specially
+		if isReplacement(resource.Change.Actions) {
 			resources.AddResource(model.ActionCreate, resource.Address)
 			resources.AddResource(model.ActionDestroy, resource.Address)
 			continue
 		}
 
 		// Process standard resources based on their actions
-		for _, action := range resource.Change.Actions {
-			switch action {
-			case "create":
-				resources.AddResource(model.ActionCreate, resource.Address)
-			case "update":
-				resources.AddResource(model.ActionUpdate, resource.Address)
-			case "delete":
-				resources.AddResource(model.ActionDestroy, resource.Address)
-			}
+		processStandardActions(resources, resource.Address, resource.Change.Actions)
+	}
+}
+
+// isNoOpAction checks if the actions list contains only "no-op"
+func isNoOpAction(actions []string) bool {
+	return len(actions) == 1 && actions[0] == "no-op"
+}
+
+// isReplacement checks if the actions list contains "replace"
+func isReplacement(actions []string) bool {
+	for _, action := range actions {
+		if action == "replace" {
+			return true
 		}
 	}
+	return false
+}
 
-	// Set summary values by counting the resource changes
+// processStandardActions processes standard create/update/delete actions
+func processStandardActions(resources *model.ResourceCollection, address string, actions []string) {
+	for _, action := range actions {
+		switch action {
+		case "create":
+			resources.AddResource(model.ActionCreate, address)
+		case "update":
+			resources.AddResource(model.ActionUpdate, address)
+		case "delete":
+			resources.AddResource(model.ActionDestroy, address)
+		}
+	}
+}
+
+// calculateSummaryValues sets the summary values in the resource collection
+func calculateSummaryValues(resources *model.ResourceCollection, resourceChanges []struct {
+	Address      string `json:"address"`
+	Mode         string `json:"mode"`
+	Type         string `json:"type"`
+	Name         string `json:"name"`
+	ProviderName string `json:"provider_name"`
+	Change       struct {
+		Actions []string    `json:"actions"`
+		Before  interface{} `json:"before"`
+		After   interface{} `json:"after"`
+	} `json:"change"`
+}) {
 	resources.FoundSummary = true
 
 	// Reset summary counters
@@ -146,41 +196,35 @@ func ParseTerraformPlan(reader io.Reader) (*model.ResourceCollection, error) {
 	resources.SummaryDestroys = 0
 
 	// Count resources by action type
-	for _, resource := range plan.ResourceChanges {
+	for _, resource := range resourceChanges {
 		if resource.Mode == "data" {
 			continue
 		}
 
 		// Special handling for replacements
-		isReplacement := false
-		for _, action := range resource.Change.Actions {
-			if action == "replace" {
-				isReplacement = true
-				break
-			}
-		}
-
-		if isReplacement {
+		if isReplacement(resource.Change.Actions) {
 			resources.SummaryAdds++
 			resources.SummaryDestroys++
 			continue
 		}
 
 		// Count standard actions
-		for _, action := range resource.Change.Actions {
-			switch action {
-			case "create":
-				resources.SummaryAdds++
-			case "update":
-				resources.SummaryChanges++
-			case "delete":
-				resources.SummaryDestroys++
-			}
+		countActionsForSummary(resources, resource.Change.Actions)
+	}
+}
+
+// countActionsForSummary counts actions for the summary counters
+func countActionsForSummary(resources *model.ResourceCollection, actions []string) {
+	for _, action := range actions {
+		switch action {
+		case "create":
+			resources.SummaryAdds++
+		case "update":
+			resources.SummaryChanges++
+		case "delete":
+			resources.SummaryDestroys++
 		}
 	}
-
-	resources.HasDetailedResources = true
-	return resources, nil
 }
 
 // parseResourceChangesOnly attempts to extract just the resource changes from the JSON
@@ -214,6 +258,21 @@ func parseResourceChangesOnly(data []byte) (*model.ResourceCollection, error) {
 	}
 
 	// Process the resource changes
+	processSimplifiedResourceChanges(resources, resourceChanges)
+
+	resources.FoundSummary = true
+	resources.HasDetailedResources = true
+	return resources, nil
+}
+
+// processSimplifiedResourceChanges processes the simplified resource changes structure
+func processSimplifiedResourceChanges(resources *model.ResourceCollection, resourceChanges []struct {
+	Address string `json:"address"`
+	Mode    string `json:"mode"`
+	Change  struct {
+		Actions []string `json:"actions"`
+	} `json:"change"`
+}) {
 	for _, resource := range resourceChanges {
 		// Skip data resources
 		if resource.Mode == "data" {
@@ -221,19 +280,11 @@ func parseResourceChangesOnly(data []byte) (*model.ResourceCollection, error) {
 		}
 
 		// Check for replacements
-		isReplacement := false
-		for _, action := range resource.Change.Actions {
-			if action == "replace" {
-				isReplacement = true
-				resources.AddResource(model.ActionCreate, resource.Address)
-				resources.AddResource(model.ActionDestroy, resource.Address)
-				resources.SummaryAdds++
-				resources.SummaryDestroys++
-				break
-			}
-		}
-
-		if isReplacement {
+		if isReplacement(resource.Change.Actions) {
+			resources.AddResource(model.ActionCreate, resource.Address)
+			resources.AddResource(model.ActionDestroy, resource.Address)
+			resources.SummaryAdds++
+			resources.SummaryDestroys++
 			continue
 		}
 
@@ -252,8 +303,4 @@ func parseResourceChangesOnly(data []byte) (*model.ResourceCollection, error) {
 			}
 		}
 	}
-
-	resources.FoundSummary = true
-	resources.HasDetailedResources = true
-	return resources, nil
 }

@@ -9,7 +9,34 @@ import (
 
 func TestParseTerraformPlan(t *testing.T) {
 	// Sample JSON plan with different resource actions
-	jsonPlan := `{
+	jsonPlan := createSampleJSONPlan()
+
+	reader := strings.NewReader(jsonPlan)
+	resources, err := ParseTerraformPlan(reader)
+
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	// Test create resources
+	testCreateResources(t, resources)
+
+	// Test update resources
+	testUpdateResources(t, resources)
+
+	// Test destroy resources
+	testDestroyResources(t, resources)
+
+	// Test summary counts
+	testSummaryCounts(t, resources)
+
+	// Test that data resources are excluded
+	testDataResourcesExcluded(t, resources)
+}
+
+// createSampleJSONPlan returns a sample JSON plan for testing
+func createSampleJSONPlan() string {
+	return `{
 		"format_version": "1.0",
 		"terraform_version": "1.4.6",
 		"resource_changes": [
@@ -75,29 +102,24 @@ func TestParseTerraformPlan(t *testing.T) {
 			}
 		]
 	}`
+}
 
-	reader := strings.NewReader(jsonPlan)
-	resources, err := ParseTerraformPlan(reader)
-
-	if err != nil {
-		t.Fatalf("Unexpected error: %v", err)
+// hasResource checks if a resource is in a list
+func hasResource(list []string, resource string) bool {
+	for _, r := range list {
+		if r == resource {
+			return true
+		}
 	}
+	return false
+}
 
-	// Test create resources
+// testCreateResources tests the create resources
+func testCreateResources(t *testing.T, resources *model.ResourceCollection) {
 	createResources := resources.GetResourcesForAction(model.ActionCreate)
 	if len(createResources) != 2 {
 		t.Errorf("Expected 2 create resources, got %d", len(createResources))
 		t.Logf("Create resources: %v", createResources)
-	}
-
-	// Check specific resources
-	hasResource := func(list []string, resource string) bool {
-		for _, r := range list {
-			if r == resource {
-				return true
-			}
-		}
-		return false
 	}
 
 	if !hasResource(createResources, "aws_s3_bucket.logs") {
@@ -107,8 +129,10 @@ func TestParseTerraformPlan(t *testing.T) {
 	if !hasResource(createResources, "aws_instance.replacement_server") {
 		t.Errorf("Expected to find aws_instance.replacement_server in create resources (replacement)")
 	}
+}
 
-	// Test update resources
+// testUpdateResources tests the update resources
+func testUpdateResources(t *testing.T, resources *model.ResourceCollection) {
 	updateResources := resources.GetResourcesForAction(model.ActionUpdate)
 	if len(updateResources) != 1 {
 		t.Errorf("Expected 1 update resource, got %d", len(updateResources))
@@ -117,8 +141,10 @@ func TestParseTerraformPlan(t *testing.T) {
 	if !hasResource(updateResources, "aws_instance.web_server") {
 		t.Errorf("Expected to find aws_instance.web_server in update resources")
 	}
+}
 
-	// Test destroy resources
+// testDestroyResources tests the destroy resources
+func testDestroyResources(t *testing.T, resources *model.ResourceCollection) {
 	destroyResources := resources.GetResourcesForAction(model.ActionDestroy)
 	if len(destroyResources) != 2 {
 		t.Errorf("Expected 2 destroy resources, got %d", len(destroyResources))
@@ -131,8 +157,10 @@ func TestParseTerraformPlan(t *testing.T) {
 	if !hasResource(destroyResources, "aws_instance.replacement_server") {
 		t.Errorf("Expected to find aws_instance.replacement_server in destroy resources (replacement)")
 	}
+}
 
-	// Test that summary counts are correct
+// testSummaryCounts tests the summary counts
+func testSummaryCounts(t *testing.T, resources *model.ResourceCollection) {
 	if resources.SummaryAdds != 2 {
 		t.Errorf("Expected SummaryAdds to be 2, got %d", resources.SummaryAdds)
 	}
@@ -144,8 +172,14 @@ func TestParseTerraformPlan(t *testing.T) {
 	if resources.SummaryDestroys != 2 {
 		t.Errorf("Expected SummaryDestroys to be 2, got %d", resources.SummaryDestroys)
 	}
+}
 
-	// Test that data resources are excluded
+// testDataResourcesExcluded tests that data resources are excluded
+func testDataResourcesExcluded(t *testing.T, resources *model.ResourceCollection) {
+	createResources := resources.GetResourcesForAction(model.ActionCreate)
+	updateResources := resources.GetResourcesForAction(model.ActionUpdate)
+	destroyResources := resources.GetResourcesForAction(model.ActionDestroy)
+
 	for _, resource := range createResources {
 		if strings.HasPrefix(resource, "data.") {
 			t.Errorf("Found data resource in create list: %s", resource)
@@ -167,6 +201,14 @@ func TestParseTerraformPlan(t *testing.T) {
 
 func TestParseTerraformPlanWithInvalidJSON(t *testing.T) {
 	// Test with invalid JSON
+	testWithInvalidJSON(t)
+
+	// Test with text format instead of JSON
+	testWithTextFormat(t)
+}
+
+// testWithInvalidJSON tests the behavior with invalid JSON
+func testWithInvalidJSON(t *testing.T) {
 	invalidJSON := `{ This is not valid JSON }`
 	reader := strings.NewReader(invalidJSON)
 	_, err := ParseTerraformPlan(reader)
@@ -174,14 +216,16 @@ func TestParseTerraformPlanWithInvalidJSON(t *testing.T) {
 	if err == nil {
 		t.Errorf("Expected error for invalid JSON, but got none")
 	}
+}
 
-	// Test with text format instead of JSON
+// testWithTextFormat tests the behavior with text format
+func testWithTextFormat(t *testing.T) {
 	textFormat := `Terraform will perform the following actions:
   + aws_s3_bucket.logs
   ~ aws_instance.web_server
   - aws_cloudfront_distribution.legacy_cdn`
-	reader = strings.NewReader(textFormat)
-	_, err = ParseTerraformPlan(reader)
+	reader := strings.NewReader(textFormat)
+	_, err := ParseTerraformPlan(reader)
 
 	if err == nil {
 		t.Errorf("Expected error for text format, but got none")
