@@ -15,19 +15,52 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for proper linting
       
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.20'
-          cache: true
+      
+      # Don't use cache feature due to the go.sum issue
+      # Instead manually download dependencies
+      - name: Download dependencies
+        run: |
+          go mod download
+          # Ensure go.sum exists even if its empty initially
+          touch go.sum
+      
+      - name: Add golangci-lint config
+        run: |
+          cat > .golangci.yml << EOL
+          version: 2
+          run:
+            timeout: 5m
+          linters:
+            disable-all: true
+            enable:
+              - errcheck
+              - govet
+              - ineffassign
+              - staticcheck
+              - unused
+              - gocyclo
+          linters-settings:
+            gocyclo:
+              min-complexity: 15
+          EOL
 
-      - name: golangci-lint
+      - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v4
         with:
           version: latest
-          args: --timeout=3m
-          
+          args: --timeout=5m
+          # Skip installation of golangci-lint binary if it exists
+          skip-pkg-cache: true
+          # Skip build cache (go env GOCACHE)
+          skip-build-cache: true
+        
       - name: Build
         run: go build -v ./...
         
