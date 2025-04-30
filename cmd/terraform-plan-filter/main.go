@@ -53,7 +53,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error opening plan file: %v\n", err)
 			os.Exit(1)
 		}
-		defer inputFile.Close()
+		// Properly handle Close() error with anonymous function
+		defer func() {
+			if closeErr := inputFile.Close(); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "Error closing input file: %v\n", closeErr)
+			}
+		}()
 	} else {
 		// Use stdin
 		inputFile = os.Stdin
@@ -84,7 +89,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
 			os.Exit(1)
 		}
-		defer outputWriter.Close()
+		// Properly handle Close() error with anonymous function
+		defer func() {
+			if closeErr := outputWriter.Close(); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "Error closing output file: %v\n", closeErr)
+			}
+		}()
 	} else {
 		outputWriter = os.Stdout
 	}
@@ -111,8 +121,15 @@ func main() {
 	}
 
 	writer := bufio.NewWriter(outputWriter)
-	writer.WriteString(output)
-	writer.Flush()
+	if _, err := writer.WriteString(output); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := writer.Flush(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error flushing writer: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Print debug information if verbose
 	util.PrintDebugInfo(result, verbose)
