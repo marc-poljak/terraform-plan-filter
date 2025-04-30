@@ -6,37 +6,28 @@ on:
   pull_request:
     branches: [ main, master ]
 
-permissions:
-  contents: read
-
 jobs:
-  golangci:
-    name: lint
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Fetch all history for proper linting
-      
+      - name: Checkout code
+        uses: actions/checkout@v3
+
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v4
         with:
           go-version: '1.20'
-      
-      # Don't use cache feature due to the go.sum issue
-      # Instead manually download dependencies
-      - name: Download dependencies
+
+      - name: Install golangci-lint v2
         run: |
-          go mod download
-          # Ensure go.sum exists even if its empty initially
-          touch go.sum
-      
-      - name: Add golangci-lint config
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.1.5
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Create golangci-lint config
         run: |
           cat > .golangci.yml << EOL
           version: 2
-          run:
-            timeout: 5m
           linters:
             disable-all: true
             enable:
@@ -52,17 +43,10 @@ jobs:
           EOL
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v4
-        with:
-          version: latest
-          args: --timeout=5m
-          # Skip installation of golangci-lint binary if it exists
-          skip-pkg-cache: true
-          # Skip build cache (go env GOCACHE)
-          skip-build-cache: true
-        
+        run: golangci-lint run --out-format=colored-line-number --timeout=5m
+
       - name: Build
         run: go build -v ./...
-        
+
       - name: Test
         run: go test -v ./...
