@@ -57,6 +57,7 @@ release:
 	GOOS=darwin GOARCH=amd64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-darwin-amd64 ./cmd/terraform-plan-filter
 	GOOS=darwin GOARCH=arm64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-darwin-arm64 ./cmd/terraform-plan-filter
 	GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-windows-amd64.exe ./cmd/terraform-plan-filter
+	GOOS=linux GOARCH=riscv64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-linux-riscv64 -ldflags "-X main.version=$(VERSION)" ./cmd/terraform-plan-filter
 
 # Default target - build and test
 all: fmt lint build test
