@@ -13,6 +13,9 @@ import (
 	"github.com/marc-poljak/terraform-plan-filter/internal/util"
 )
 
+// version is set during build using -ldflags
+var version = "dev"
+
 func main() {
 	// Parse command-line flags and set up configuration
 	config := parseCommandLineFlags()
@@ -69,6 +72,7 @@ type Config struct {
 // parseCommandLineFlags parses command-line flags and returns a Config
 func parseCommandLineFlags() Config {
 	var config Config
+	var showVersion bool
 
 	flag.BoolVar(&config.noColor, "no-color", false, "Disable colored output")
 	flag.BoolVar(&config.jsonOut, "json", false, "Output in JSON format")
@@ -76,7 +80,14 @@ func parseCommandLineFlags() Config {
 	flag.StringVar(&config.planFile, "plan", "", "Terraform JSON plan file (default: stdin)")
 	flag.StringVar(&config.outputFile, "output", "", "Output file (default: stdout)")
 	flag.BoolVar(&config.verbose, "verbose", false, "Show verbose output")
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
 	flag.Parse()
+
+	// Show version if requested
+	if showVersion {
+		fmt.Printf("terraform-plan-filter version %s\n", version)
+		os.Exit(0)
+	}
 
 	// Force no-color if environment variable is set
 	if os.Getenv("NO_COLOR") != "" || os.Getenv("TERM") == "dumb" {

@@ -11,6 +11,8 @@ build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
 	go build -o $(BUILD_DIR)/$(BINARY_NAME) -ldflags "-X main.version=$(VERSION)" ./cmd/terraform-plan-filter
+	@echo "Build complete. Binary is located at $(BUILD_DIR)/$(BINARY_NAME)"
+	@echo "Version: $(VERSION)"
 
 # Run tests
 test:

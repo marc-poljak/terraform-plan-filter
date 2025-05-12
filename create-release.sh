@@ -10,7 +10,6 @@ make release
 # Create a GitHub release using gh CLI tool
 gh release create $VERSION \
   --title "Terraform Plan Filter $VERSION" \
-  --notes "Release of Terraform Plan Filter with RISC-V support." \
   ./build/release/terraform-plan-filter-linux-amd64 \
   ./build/release/terraform-plan-filter-darwin-amd64 \
   ./build/release/terraform-plan-filter-darwin-arm64 \
