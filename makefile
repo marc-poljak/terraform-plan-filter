@@ -13,7 +13,7 @@ build:
 	go build -o $(BUILD_DIR)/$(BINARY_NAME) -ldflags "-X main.version=$(VERSION)" ./cmd/terraform-plan-filter
 	@echo "Build complete. Binary is located at $(BUILD_DIR)/$(BINARY_NAME)"
 	@echo "Version: $(VERSION)"
-
+	
 # Run tests
 test:
 	go test -v ./...
@@ -55,11 +55,13 @@ lint:
 release:
 	@echo "Building for multiple platforms..."
 	@mkdir -p $(BUILD_DIR)/release
-	GOOS=linux GOARCH=amd64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-linux-amd64 ./cmd/terraform-plan-filter
-	GOOS=darwin GOARCH=amd64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-darwin-amd64 ./cmd/terraform-plan-filter
-	GOOS=darwin GOARCH=arm64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-darwin-arm64 ./cmd/terraform-plan-filter
-	GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-windows-amd64.exe ./cmd/terraform-plan-filter
+	GOOS=linux GOARCH=amd64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-linux-amd64 -ldflags "-X main.version=$(VERSION)" ./cmd/terraform-plan-filter
+	GOOS=darwin GOARCH=amd64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-darwin-amd64 -ldflags "-X main.version=$(VERSION)" ./cmd/terraform-plan-filter
+	GOOS=darwin GOARCH=arm64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-darwin-arm64 -ldflags "-X main.version=$(VERSION)" ./cmd/terraform-plan-filter
+	GOOS=windows GOARCH=amd64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-windows-amd64.exe -ldflags "-X main.version=$(VERSION)" ./cmd/terraform-plan-filter
 	GOOS=linux GOARCH=riscv64 go build -o $(BUILD_DIR)/release/$(BINARY_NAME)-linux-riscv64 -ldflags "-X main.version=$(VERSION)" ./cmd/terraform-plan-filter
+	@echo "Build complete. Binaries available in $(BUILD_DIR)/release/"
+	@ls -la $(BUILD_DIR)/release/
 
 # Default target - build and test
 all: fmt lint build test
